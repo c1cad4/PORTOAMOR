@@ -1,0 +1,96 @@
+name: Publish full PORTOAMOR from ZIP
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'PORTOAMOR_GITHUB_PAGES_FULL.zip'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: portoamor-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Validate and extract complete store
+        id: extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f PORTOAMOR_GITHUB_PAGES_FULL.zip ]]; then
+            echo "No release archive found; nothing to deploy"
+            echo "has_archive=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          unzip -tqq PORTOAMOR_GITHUB_PAGES_FULL.zip
+          python3 - <<'PY'
+          from pathlib import PurePosixPath
+          from zipfile import ZipFile
+          with ZipFile('PORTOAMOR_GITHUB_PAGES_FULL.zip') as z:
+              files = set(z.namelist())
+              required = ['index.html', 'shop.html', 'studio_viewer.js', '.nojekyll',
+                          'assets/garments/T01.png']
+              missing = [name for name in required if name not in files]
+              if missing:
+                  raise SystemExit('Incomplete release archive: ' + ', '.join(missing))
+              for name in files:
+                  path = PurePosixPath(name)
+                  if path.is_absolute() or '..' in path.parts:
+                      raise SystemExit('Unsafe archive path: ' + name)
+              garments = sum(name.startswith('assets/garments/') and name.endswith('.png') for name in files)
+              models = sum(name.startswith('assets/3d/') and name.endswith('.glb') for name in files)
+              if garments < 66 or models < 66:
+                  raise SystemExit(f'Incomplete assets: images={garments}, models={models}')
+              print(f'Validated {len(files)} files; images={garments}, models={models}')
+          PY
+          mkdir -p "$RUNNER_TEMP/portoamor-site"
+          unzip -qq PORTOAMOR_GITHUB_PAGES_FULL.zip -d "$RUNNER_TEMP/portoamor-site"
+          echo "has_archive=true" >> "$GITHUB_OUTPUT"
+
+      - name: Replace published files and update main
+        if: steps.extract.outputs.has_archive == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -a --delete --exclude='/.git/' --exclude='/.github/' \
+            --exclude='/LICENSE' --exclude='/PORTOAMOR_GITHUB_PAGES_FULL.zip' \
+            "$RUNNER_TEMP/portoamor-site/" "$GITHUB_WORKSPACE/"
+          rm -f PORTOAMOR_GITHUB_PAGES_FULL.zip
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Deploy verified complete PORTOAMOR store"
+            git push origin HEAD:main
+          fi
+
+      - name: Configure GitHub Pages
+        if: steps.extract.outputs.has_archive == 'true'
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload website
+        if: steps.extract.outputs.has_archive == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Deploy website
+        if: steps.extract.outputs.has_archive == 'true'
+        uses: actions/deploy-pages@v4
